@@ -528,10 +528,11 @@ async function startServer() {
 
 startServer();
 
-
-
 // http://localhost:8000/joined-events
 // http://localhost:8000/manage-events
 // http://localhost:8000/events
 // http://localhost:8000/create-event
 // http://localhost:8000
+
+
+export default app;
