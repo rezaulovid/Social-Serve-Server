@@ -1,60 +1,82 @@
-
 import express from "express";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import cors from "cors";
 
 const app = express();
-const PORT = process.env.PORT || 8000;
+const PORT = process.env.PORT || 8080;
 
 // Middleware
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: ["https://socialserve-blush.vercel.app"],
     credentials: true,
-  })
+  }),
 );
 app.use(express.json());
 
 // MongoDB Connection
-const uri = process.env.MONGODB_URL;
-
-if (!uri) {
-  console.error("Missing MONGODB_URL in .env");
-  process.exit(1);
-}
-
-const client = new MongoClient(uri);
-
+let client;
+let dbPromise = null;
 let createeventCollection;
 let registrationsCollection;
 
 async function connectToMongoDB() {
-  await client.connect();
+  if (createeventCollection && registrationsCollection) {
+    return;
+  }
 
-  console.log("Successfully connected to MongoDB!");
+  if (!dbPromise) {
+    dbPromise = (async () => {
+      const uri = process.env.MONGODB_URL;
+      if (!uri) {
+        throw new Error("Missing MONGODB_URL in environment variables");
+      }
 
-  const db = client.db("socialserve");
+      if (!client) {
+        client = new MongoClient(uri);
+      }
 
-  createeventCollection = db.collection("createevent");
-  registrationsCollection = db.collection("eventRegistrations");
+      await client.connect();
 
-  // Prevent duplicate registrations
-  await registrationsCollection.createIndex(
-    { eventId: 1, userId: 1 },
-    { unique: true }
-  );
+      const db = client.db("socialserve");
+      createeventCollection = db.collection("createevent");
+      registrationsCollection = db.collection("eventRegistrations");
+      console.log("Successfully connected to MongoDB!");
 
-  await registrationsCollection.createIndex({ userId: 1 });
+      // Prevent duplicate registrations
+      try {
+        await registrationsCollection.createIndex({ eventId: 1, userId: 1 }, { unique: true });
+        await registrationsCollection.createIndex({ userId: 1 });
+      } catch (idxError) {
+        console.warn("Index creation warning:", idxError.message);
+      }
+    })().catch((err) => {
+      dbPromise = null;
+      throw err;
+    });
+  }
+
+  await dbPromise;
 }
+
+// Ensure MongoDB is connected before handling any route
+app.use(async (req, res, next) => {
+  try {
+    await connectToMongoDB();
+    next();
+  } catch (error) {
+    console.error("Database connection error in middleware:", error);
+    res.status(500).json({
+      message: "Database connection failed",
+      error: error.message,
+    });
+  }
+});
 
 // Validate MongoDB ObjectId
 function isValidObjectId(id) {
-  return (
-    typeof id === "string" &&
-    ObjectId.isValid(id) &&
-    String(new ObjectId(id)) === id
-  );
+  return typeof id === "string" && ObjectId.isValid(id) && String(new ObjectId(id)) === id;
 }
 
 // Temporary identity helper.
@@ -74,14 +96,7 @@ function getUserId(req) {
 // CREATE EVENT
 app.post("/create-event", async (req, res) => {
   try {
-    const {
-      title,
-      eventType,
-      eventDate,
-      location,
-      thumbnailUrl,
-      description,
-    } = req.body;
+    const { title, eventType, eventDate, location, thumbnailUrl, description } = req.body;
 
     if (!title || !eventType || !eventDate || !location || !thumbnailUrl) {
       return res.status(400).json({
@@ -118,10 +133,7 @@ app.post("/create-event", async (req, res) => {
 // GET MANAGE EVENTS
 app.get("/manage-events", async (req, res) => {
   try {
-    const result = await createeventCollection
-      .find({})
-      .sort({ createdAt: -1 })
-      .toArray();
+    const result = await createeventCollection.find({}).sort({ createdAt: -1 }).toArray();
 
     res.status(200).json(result);
   } catch (error) {
@@ -144,14 +156,7 @@ app.put("/manage-events/:id", async (req, res) => {
       });
     }
 
-    const {
-      title,
-      eventType,
-      eventDate,
-      location,
-      thumbnailUrl,
-      description,
-    } = req.body;
+    const { title, eventType, eventDate, location, thumbnailUrl, description } = req.body;
 
     if (!title || !eventType || !eventDate || !location || !thumbnailUrl) {
       return res.status(400).json({
@@ -171,7 +176,7 @@ app.put("/manage-events/:id", async (req, res) => {
 
     const result = await createeventCollection.updateOne(
       { _id: new ObjectId(id) },
-      { $set: updateData }
+      { $set: updateData },
     );
 
     if (result.matchedCount === 0) {
@@ -234,10 +239,7 @@ app.delete("/manage-events/:id", async (req, res) => {
 // GET UPCOMING EVENTS
 app.get("/events", async (req, res) => {
   try {
-    const result = await createeventCollection
-      .find({})
-      .sort({ eventDate: 1 })
-      .toArray();
+    const result = await createeventCollection.find({}).sort({ eventDate: 1 }).toArray();
 
     // Add actual registration count to every event
     const eventsWithCount = await Promise.all(
@@ -250,7 +252,7 @@ app.get("/events", async (req, res) => {
           ...event,
           participants,
         };
-      })
+      }),
     );
 
     res.status(200).json(eventsWithCount);
@@ -431,9 +433,7 @@ app.get("/joined-events", async (req, res) => {
 
     const eventIds = registrations.map((item) => item.eventId);
 
-    const events = await createeventCollection
-      .find({ _id: { $in: eventIds } })
-      .toArray();
+    const events = await createeventCollection.find({ _id: { $in: eventIds } }).toArray();
 
     const joinedEvents = await Promise.all(
       events.map(async (event) => {
@@ -444,11 +444,10 @@ app.get("/joined-events", async (req, res) => {
         return {
           ...event,
           participants,
-          joinedAt: registrations.find(
-            (item) => String(item.eventId) === String(event._id)
-          )?.joinedAt,
+          joinedAt: registrations.find((item) => String(item.eventId) === String(event._id))
+            ?.joinedAt,
         };
-      })
+      }),
     );
 
     res.status(200).json(joinedEvents);
@@ -512,27 +511,23 @@ app.use((err, req, res, next) => {
   });
 });
 
-// START SERVER
-async function startServer() {
-  try {
-    await connectToMongoDB();
-
-    app.listen(PORT, () => {
-      console.log(`Server is running at http://localhost:${PORT}`);
+// START SERVER (Local Development)
+if (!process.env.VERCEL) {
+  connectToMongoDB()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`Server is running at http://localhost:${PORT}`);
+      });
+    })
+    .catch((error) => {
+      console.error("MongoDB initial connection failed:", error);
     });
-  } catch (error) {
-    console.error("MongoDB connection failed:", error);
-    process.exit(1);
-  }
 }
-
-startServer();
 
 // http://localhost:8000/joined-events
 // http://localhost:8000/manage-events
 // http://localhost:8000/events
 // http://localhost:8000/create-event
 // http://localhost:8000
-
 
 export default app;
